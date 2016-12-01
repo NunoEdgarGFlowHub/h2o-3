@@ -106,11 +106,11 @@ public enum GlrmLoss {
 
 
   //--------------------------------------------------------------------------------------------------------------------
-  // Loss functions for binary features
+  // Loss functions for binary features read in as categorical or numeric
   //--------------------------------------------------------------------------------------------------------------------
 
   Logistic {
-    @Override public boolean isForNumeric() { return false; }
+    @Override public boolean isForNumeric() { return true; }
     @Override public boolean isForCategorical() { return false; }
     @Override public boolean isForBinary() { return true; }
 
@@ -118,12 +118,36 @@ public enum GlrmLoss {
       assert a == 0 || a == 1 : "Logistic loss should be applied to binary features only";
       return Math.log(1 + Math.exp((1 - 2*a)*u));
     }
+
+    @Override public double mloss(double[] u, int a) {
+      return loss(u[0], (double) a);
+    }
+
+    @Override public double mloss(double[] u, int a, int u_len) {
+      return loss(u[0], (double) a);
+    }
+
     @Override public double lgrad(double u, double a) {
       double s = 1 - 2*a;
-      return s/(1 + Math.exp(s*u));
+      return s*Math.exp(s*u)/(1 + Math.exp(s*u));
     }
+
+    @Override
+    public double[] mlgrad(double[] u, int a, double[] prod, int u_len) {
+      prod[0] = lgrad(u[0], a);
+      return prod;
+    }
+
+    @Override public double[] mlgrad(double[] u, int a) {
+      return mlgrad(u, a, new double[1], 1);
+    }
+
     @Override public double impute(double u) {
       return u > 0? 1 : 0;
+    }
+
+    @Override public int mimpute(double[] u) {
+      return (int) impute(u[0]);
     }
   },
 
@@ -142,6 +166,10 @@ public enum GlrmLoss {
     }
     @Override public double impute(double u) {
       return u > 0? 1 : 0;
+    }
+
+    @Override public int mimpute(double[] u) {
+      return ArrayUtils.maxIndex(u);
     }
   },
 
@@ -190,13 +218,13 @@ public enum GlrmLoss {
     @Override public boolean isForCategorical() { return true; }
     @Override public boolean isForBinary() { return false; }
 
-    @Override public double mloss(double[] u, int a) {
-      if (!(a >= 0 && a < u.length)) throw new IndexOutOfBoundsException("a must be between 0 and " + (u.length - 1));
+    @Override public double mloss(double[] u, int a) { return mloss(u, a, u.length); }
+/*      if (!(a >= 0 && a < u.length)) throw new IndexOutOfBoundsException("a must be between 0 and " + (u.length - 1));
       double sum = 0;
       for (int i = 0; i < u.length - 1; i++)
         sum += a > i ? Math.max(1 - u[i], 0) : 1;
       return sum;
-    }
+    } */
     @Override public double mloss(double[] u, int a, int u_len) {
       if (!(a >= 0 && a < u_len)) throw new IndexOutOfBoundsException("a must be between 0 and " + (u_len - 1));
       double sum = 0;
@@ -207,10 +235,12 @@ public enum GlrmLoss {
     @Override public double[] mlgrad(double[] u, int a) {
       if (!(a >= 0 && a < u.length)) throw new IndexOutOfBoundsException("a must be between 0 and " + (u.length - 1));
       double[] grad = new double[u.length];
-      for (int i = 0; i < u.length - 1; i++)
+      return mlgrad(u, a, grad, u.length);
+    }
+/*      for (int i = 0; i < u.length - 1; i++)
         grad[i] = (a > i && 1 - u[i] > 0) ? -1 : 0;
       return grad;
-    }
+    }*/
     @Override public double[] mlgrad(double[] u, int a, double[] grad, int u_len) {
       if (!(a >= 0 && a < u_len)) throw new IndexOutOfBoundsException("a must be between 0 and " + (u_len - 1));
       for (int i = 0; i < u_len - 1; i++)

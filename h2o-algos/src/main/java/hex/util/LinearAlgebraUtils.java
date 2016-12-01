@@ -58,9 +58,16 @@ public class LinearAlgebraUtils {
           continue;   // Skip if entry missing and no NA bucket. All indicators will be zero.
         else
           cidx = dinfo._catOffsets[col+1]-1;  // Otherwise, missing value turns into extra (last) factor
-      } else
-        cidx = dinfo.getCategoricalId(col, (int)row[col]);
-      if(cidx >= 0) tmp[cidx] = 1;
+      } else {
+        if ((dinfo._catOffsets[col + 1] - dinfo._catOffsets[col]) == 1)
+          cidx = dinfo.getCategoricalId(col, 0);
+        else
+          cidx = dinfo.getCategoricalId(col, (int) row[col]);
+      }
+
+      if (((dinfo._catOffsets[col+1]-dinfo._catOffsets[col]) == 1) && cidx >=0)  // binary data here, no column expansion, copy data
+        tmp[cidx] = row[col];
+      else if(cidx >= 0) tmp[cidx] = 1;
     }
 
     // Numeric columns

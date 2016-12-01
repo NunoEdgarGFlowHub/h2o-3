@@ -244,16 +244,26 @@ public class GLRM extends ModelBuilder<GLRMModel, GLRMModel.GLRMParameters, GLRM
     for (int i = 0; i < _ncolA; i++) {
       Vec vi = _train.vec(i);
       GlrmLoss lossi = _lossFunc[i];
-      if (vi.isNumeric()) {
+        // take care of pure numeric columns.  Binary numeric columns has isBinary() = true
+      if (vi.isNumeric() && !vi.isBinary()) {
         if (!lossi.isForNumeric())
           error("_loss_by_col", "Loss function " + lossi + " cannot be applied to numeric column " + i);
+      }  else if (vi.isBinary()) {
+        // Allow numeric loss functions, multi-loss on binary columns too; but not the other way round!
+        if (!lossi.isForBinary() && !lossi.isForNumeric() && !lossi.isForCategorical())
+          error("_loss_by_col", "Loss function " + lossi + " cannot be applied to binary column " + i);
+        // make sure we are not calling init mode SVD for categorical binary columns with binary loss
+        if (vi.isCategorical() && lossi.isForBinary()) {
+          if (_parms._init == GlrmInitialization.SVD) { // cannot use SVD as init mode with categorical binary column
+            String msg = "Cannot use init mode SVD when using binary loss function with categorical binary columns.  " +
+                    "If you must use SVD init mode for your binary loss function, go back and change your " +
+                    "categorical binary columns using binary loss functions to numerics columns.";
+            error("_train", msg);
+          }
+        }
       } else if (vi.isCategorical()) {
         if (!lossi.isForCategorical())
           error("_loss_by_col", "Loss function " + lossi + " cannot be applied to categorical column " + i);
-      } else if (vi.isBinary()) {
-        // Allow numeric loss functions on binary columns too; but not the other way round!
-        if (!lossi.isForBinary() && !lossi.isForNumeric())
-          error("_loss_by_col", "Loss function " + lossi + " cannot be applied to binary column " + i);
       }
 
       // For "Periodic" loss function supply the period. We currently have no support for different periods for
@@ -448,7 +458,7 @@ public class GLRM extends ModelBuilder<GLRMModel, GLRMModel.GLRMParameters, GLRM
         // Permute cluster columns to align with dinfo, normalize nums, and expand out cats to indicator cols
         centers = ArrayUtils.permuteCols(km._output._centers_raw, tinfo.mapNames(km._output._names));
         centers = transform(centers, tinfo._normSub, tinfo._normMul, tinfo._cats, tinfo._nums);
-        centers_exp = expandCats(centers, tinfo);
+        centers_exp = expandCats(centers, tinfo); // expand categorical columns to N binary columns
       } else
         error("_init", "Initialization method " + _parms._init + " is undefined");
 
@@ -639,9 +649,23 @@ public class GLRM extends ModelBuilder<GLRMModel, GLRMModel.GLRMParameters, GLRM
                              false, false, false, /* weights */ false, /* offset */ false, /* fold */ false);
         DKV.put(tinfo._key, tinfo);
 
+
         tempinfo = new DataInfo(_train, null, 0, true, _parms._transform, DataInfo.TransformType.NONE,
                 false, false, false, /* weights */ false, /* offset */ false, /* fold */ false);
  //       DKV.put(tempinfo._key, tempinfo);
+
+        model._output._permutation = tinfo._permutation;
+        model._output._nnums = tinfo._nums;
+        model._output._ncats = tinfo._cats;
+        model._output._catOffsets = tinfo._catOffsets;
+        int[] numLevels = tinfo._adaptedFrame.cardinality();
+        int[] numCatColumns = tinfo._adaptedFrame.cardinality();
+
+        // need to prevent binary data column being expanded into two when the loss function is logistic here
+        correctForLogistic(tinfo, numCatColumns);
+        if (error_count() > 0) throw new IllegalArgumentException("Found validation errors: " + validationErrors());
+        model._output._catOffsets = tinfo._catOffsets;
+        model._output._names_expanded = tinfo.coefNames_glrm();
 
         // Save training frame adaptation information for use in scoring later
         model._output._normSub = tinfo._normSub == null ? new double[tinfo._nums] : tinfo._normSub;
@@ -650,11 +674,6 @@ public class GLRM extends ModelBuilder<GLRMModel, GLRMModel.GLRMParameters, GLRM
           Arrays.fill(model._output._normMul, 1.0);
         } else
           model._output._normMul = tinfo._normMul;
-        model._output._permutation = tinfo._permutation;
-        model._output._nnums = tinfo._nums;
-        model._output._ncats = tinfo._cats;
-        model._output._catOffsets = tinfo._catOffsets;
-        model._output._names_expanded = tinfo.coefNames();
 
         // Save loss function for each column in adapted frame order
         assert _lossFunc != null && _lossFunc.length == _train.numCols();
@@ -683,7 +702,7 @@ public class GLRM extends ModelBuilder<GLRMModel, GLRMModel.GLRMParameters, GLRM
         DKV.put(dinfo._key, dinfo);
 
         int weightId = dinfo._weights ? dinfo.weightChunkId() : -1;
-        int[] numLevels = tinfo._adaptedFrame.cardinality();
+
 
         // Use closed form solution for X if quadratic loss and regularization
         _job.update(1, "Initializing X and Y matrices");   // One unit of work
@@ -691,7 +710,8 @@ public class GLRM extends ModelBuilder<GLRMModel, GLRMModel.GLRMParameters, GLRM
         double[/*k*/][/*features*/] yinit = initialXY(tinfo, dinfo._adaptedFrame, model, na_cnt); // on normalized A
         
         // Store Y' for more efficient matrix ops (rows = features, cols = k rank)
-        Archetypes yt = new Archetypes(ArrayUtils.transpose(yinit), true, tinfo._catOffsets, numLevels);
+        Archetypes yt = new Archetypes(ArrayUtils.transpose(yinit), true, tinfo._catOffsets, numLevels,
+                numCatColumns);
         Archetypes ytnew = yt;
 
         double yreg = _parms._regularization_y.regularize(yt._archetypes);
@@ -738,7 +758,7 @@ public class GLRM extends ModelBuilder<GLRMModel, GLRMModel.GLRMParameters, GLRM
             UpdateY ytsk = new UpdateY(_parms, yt, step/_ncolA, _ncolA, _ncolX, dinfo._cats, model._output._normSub,
                     model._output._normMul, model._output._lossFunc, weightId);
             double[][] yttmp = ytsk.doAll(dinfo._adaptedFrame)._ytnew;
-            ytnew = new Archetypes(yttmp, true, dinfo._catOffsets, numLevels);
+            ytnew = new Archetypes(yttmp, true, tinfo._catOffsets, numLevels, numCatColumns);
             yreg = ytsk._yreg;
             model._output._updates++;
           }
@@ -841,6 +861,52 @@ public class GLRM extends ModelBuilder<GLRMModel, GLRMModel.GLRMParameters, GLRM
       }
     }
 
+    /*
+    This funciton will
+    1. prevent binary columns with logistic loss functions specified from being expanded into
+    two columns.  If no logistic loss is specified, no action will be performed.
+    2. for numeric columns using logistic loss, it will prevent it from being transformed to say zero mean
+    and unit variance columns.
+     */
+    private void correctForLogistic(DataInfo tinfo, int[] numCatColumns) {
+      int[] catOffsets = new int[tinfo._catOffsets.length];
+      boolean changed = false;  // no change is detected here yet.
+
+      for (int index = 0; index < tinfo._cats; index++) { // change for categorical columns only
+        if (_lossFunc[tinfo._permutation[index]].isForBinary()) {
+          // change the info for that column in tinfo for Logistic loss only
+          changed = true;   // encounter change.  Need to re-assign catOffsets and numOffset at the end
+          catOffsets[index+1] = 1;  // suppress column expansion here
+          numCatColumns[index] = 1;
+        } else
+          catOffsets[index+1] = tinfo._catOffsets[index+1]-tinfo._catOffsets[index];
+      }
+
+      if (changed) {  // only perform tinfo info update if anything has changed.
+        int sum = 0;
+        for (int index = 1; index < tinfo._catOffsets.length; index++) {
+          sum += catOffsets[index];   // update tinof._catOffsets[]
+          tinfo._catOffsets[index] = sum;
+        }
+
+        for (int index = 0; index < tinfo._numOffsets.length; index++) {
+          tinfo._numOffsets[index] = sum++;   // update tinfo._numOffests[]
+        }
+
+        _ncolY = _train == null? -1 : tinfo._numOffsets[tinfo._numOffsets.length-1];
+      }
+
+      for (int index = 0; index < tinfo._nums; index++) {
+        if (_lossFunc[tinfo._permutation[index+tinfo._cats]].isForBinary()) { // binary loss used on numeric columns
+          if (tinfo._normMul != null)
+            tinfo._normMul[index] = 1;
+
+          if (tinfo._normSub != null)
+            tinfo._normSub[index] = 0;
+        }
+      }
+    }
+
     private TwoDimTable createModelSummaryTable(GLRMModel.GLRMOutput output) {
       List<String> colHeaders = new ArrayList<>();
       List<String> colTypes = new ArrayList<>();
@@ -906,13 +972,23 @@ public class GLRM extends ModelBuilder<GLRMModel, GLRMModel.GLRMParameters, GLRM
     double[][] _archetypes;  // Y has nrows = k (lower dim), ncols = n (features)
     boolean _transposed;     // Is _archetypes = Y'? Used during model building for convenience.
     final int[] _catOffsets;
-    final int[] _numLevels;  // numLevels[i] = -1 if column i is not categorical
+    final int[] _numLevels;       // equals to cardinality of categorical columns
+    final int[] _numCatColumns;    // number of columns a categorical column is expanded to
 
     Archetypes(double[][] y, boolean transposed, int[] catOffsets, int[] numLevels) {
       _archetypes = y;
       _transposed = transposed;
       _catOffsets = catOffsets;
       _numLevels = numLevels;   // TODO: Check sum(cardinality[cardinality > 0]) + nnums == nfeatures()
+      _numCatColumns = Arrays.copyOf(_numLevels, _numLevels.length);  // to be changed later
+    }
+
+    Archetypes(double[][] y, boolean transposed, int[] catOffsets, int[] numLevels, int[] catCatColumns) {
+      _archetypes = y;
+      _transposed = transposed;
+      _catOffsets = catOffsets;
+      _numLevels = numLevels;   // TODO: Check sum(cardinality[cardinality > 0]) + nnums == nfeatures()
+      _numCatColumns = catCatColumns;  // to be changed later
     }
 
     public int rank() {
@@ -965,7 +1041,7 @@ public class GLRM extends ModelBuilder<GLRMModel, GLRMModel.GLRMParameters, GLRM
 
     // For j = 0 to number of categorical columns - 1, and level = 0 to number of levels in categorical column - 1
     public int getCatCidx(int j, int level) {
-      int catColJLevel = _numLevels[j];
+      int catColJLevel = _numLevels[j]; // variable not used in calculation
       assert catColJLevel != 0 : "Number of levels in categorical column cannot be zero";
       assert !Double.isNaN(level) && level >= 0 && level < catColJLevel : "Got level = " + level +
               " when expected integer in [0," + catColJLevel + ")";
@@ -1023,7 +1099,7 @@ public class GLRM extends ModelBuilder<GLRMModel, GLRMModel.GLRMParameters, GLRM
 
     // Vector-matrix product x * Y_j where Y_j is block of Y corresponding to categorical column j
     protected final double[] lmulCatBlock(double[] x, int j) {
-      int catColJLevel = _numLevels[j];
+      int catColJLevel = _numCatColumns[j];
       assert catColJLevel != 0 : "Number of levels in categorical column cannot be zero";
       assert x != null && x.length == rank() : "x must be of length " + rank();
       double[] prod = new double[catColJLevel];
@@ -1218,9 +1294,10 @@ public class GLRM extends ModelBuilder<GLRMModel, GLRMModel.GLRMParameters, GLRM
         // Categorical columns
         for (int j = 0; j < _ncats; j++) {
           a[j] = cs[j].atd(row);
-          int catColJLevel = _yt._numLevels[j];
-          Arrays.fill(xy, 0, catColJLevel, 0);  // reset xy before accumulate sum
-          if (Double.isNaN(a[j])) continue;   // Skip missing observations in row
+
+          int catColJLevel = _yt._numCatColumns[j];
+          Arrays.fill(xy, 0, catColJLevel, 0);
+]          if (Double.isNaN(a[j])) continue;   // Skip missing observations in row
 
           // Calculate x_i * Y_j where Y_j is sub-matrix corresponding to categorical col j
           for (int level = 0; level < catColJLevel ; level++) {
@@ -1283,7 +1360,7 @@ public class GLRM extends ModelBuilder<GLRMModel, GLRMModel.GLRMParameters, GLRM
         for (int j = 0; j < _ncats; j++) {
           if (Double.isNaN(a[j])) continue;   // Skip missing observations in row
           multVecArrFast(xnew, prod, _yt, j);
-          _loss +=  _lossFunc[j].mloss(prod, (int) a[j], _yt._numLevels[j]);
+          _loss +=  _lossFunc[j].mloss(prod, (int) a[j], _yt._numCatColumns[j]);
         }
 
         // Numeric columns
@@ -1300,7 +1377,7 @@ public class GLRM extends ModelBuilder<GLRMModel, GLRMModel.GLRMParameters, GLRM
 
     /* same as ArrayUtils.multVecArr() but faster I hope. */
     private void multVecArrFast(double[] xnew, double[] xy, Archetypes yt, int j) {
-      int catColJLevel = yt._numLevels[j];
+      int catColJLevel = yt._numCatColumns[j];
       if (yt._transposed) {
         for (int level = 0; level < catColJLevel; level++) {
           int cidx = yt.getCatCidx(j, level);
@@ -1378,7 +1455,7 @@ public class GLRM extends ModelBuilder<GLRMModel, GLRMModel.GLRMParameters, GLRM
 
       // Categorical columns
       for (int j = 0; j < _ncats; j++) {
-        int catColJLevel = _ytold._numLevels[j];
+        int catColJLevel = _ytold._numCatColumns[j];
         // Compute gradient of objective at column
         for (int row = 0; row < cs[0]._len; row++) {
           double a = cs[j].atd(row);
@@ -1514,11 +1591,12 @@ public class GLRM extends ModelBuilder<GLRMModel, GLRMModel.GLRMParameters, GLRM
 
         // Categorical columns
         for (int j = 0; j < _ncats; j++) {
-          int catColJLevel = _yt._numLevels[j];
-          Arrays.fill(xy, 0, catColJLevel, 0);  // reset before next accumulation sum
+
+          int catColJLevel = _yt._numCatColumns[j];
           double a = cs[j].atd(row);
           if (Double.isNaN(a)) continue;
 
+          Arrays.fill(xy, 0, catColJLevel, 0);  // need to refresh before next round
           // Calculate x_i * Y_j where Y_j is sub-matrix corresponding to categorical col j
           for (int level = 0; level < catColJLevel; level++) {
             for (int k = 0; k < _ncolX; k++) {

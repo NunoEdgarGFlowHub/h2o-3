@@ -747,6 +747,66 @@ public class DataInfo extends Keyed<DataInfo> {
     return res;
   }
 
+  /*
+  This is very similar to the original coefNames method.  However, here, we need to prevent
+  binary columns from being expanded into 2 columns to deal with binary loss.
+   */
+  public final String[] coefNames_glrm() {
+    if (_coefNames != null) return _coefNames; // already computed
+    int k = 0;
+    final int n = fullN(); // total number of columns to compute
+    String [] res = new String[n];
+    final Vec [] vecs = _adaptedFrame.vecs();
+
+    // first do all of the expanded categorical names
+    for(int i = 0; i < _cats; ++i) {
+      for (int j = (_useAllFactorLevels || vecs[i] instanceof InteractionWrappedVec) ? 0 : 1; j < vecs[i].domain().length; ++j) {
+        int jj = getCategoricalId(i, j);
+        if(jj < 0)
+          continue;
+
+        if ((_catOffsets[i+1]-_catOffsets[i]) == 1) {
+          res[k++] = _adaptedFrame._names[i];
+          break;  // go to next column i.  Binary column not expanded here.
+        } else
+          res[k++] = _adaptedFrame._names[i] + "." + vecs[i].domain()[j];
+
+      }
+
+      if ((_catOffsets[i+1]-_catOffsets[i]) > 1) {
+        if (_catMissing[i] && getCategoricalId(i, _catNAFill[i]) >= 0)
+          res[k++] = _adaptedFrame._names[i] + ".missing(NA)";
+        if (vecs[i] instanceof InteractionWrappedVec) {
+          InteractionWrappedVec iwv = (InteractionWrappedVec) vecs[i];
+          if (null != iwv.missingDomains()) {
+            for (String s : iwv.missingDomains())
+              res[k++] = s + ".missing(NA)";
+          }
+        }
+      }
+    }
+    // now loop over the numerical columns, collecting up any expanded InteractionVec names
+    if( _interactions==null ) {
+      final int nums = n-k;
+      System.arraycopy(_adaptedFrame._names, _cats, res, k, nums);
+    } else {
+      for (int i = 0; i <= _nums; i++) {
+        InteractionWrappedVec v;
+        if( i+_cats >= n || k >=n ) break;
+        if (vecs[i+_cats] instanceof InteractionWrappedVec && ((v = (InteractionWrappedVec) vecs[i+_cats]).domain() != null)) { // in this case, get the categoricalOffset
+          for (int j = _useAllFactorLevels?0:1; j < v.domain().length; ++j) {
+            if (getCategoricalIdFromInteraction(_cats+i, j) < 0)
+              continue;
+            res[k++] = _adaptedFrame._names[i+_cats] + "." + v.domain()[j];
+          }
+        } else
+          res[k++] = _adaptedFrame._names[i+_cats];
+      }
+    }
+    _coefNames = res;
+    return res;
+  }
+
   // Return permutation matrix mapping input names to adaptedFrame colnames
   public int[] mapNames(String[] names) {
     assert names.length == _adaptedFrame._names.length : "Names must be the same length!";
