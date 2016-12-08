@@ -19,10 +19,12 @@ data2 <- as.h2o(data2)
 
 # Build GLRM model
 glrm_model2 <- h2o.glrm(data2,  k = 2, ignore_const_cols = TRUE)
+glrm_model3 <- h2o.glrm(data, k=2)
 glrm_model <- h2o.glrm(data,  k = 2, ignore_const_cols = TRUE)
 browser()
 
 archetypes2 <- h2o.proj_archetypes(glrm_model2, data2)
+archetypes3 <- h2o.proj_archetypes(glrm_model3, data)
 archetypes <- h2o.proj_archetypes(glrm_model, data)
 
 }
