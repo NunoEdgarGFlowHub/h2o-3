@@ -1297,7 +1297,7 @@ public class GLRM extends ModelBuilder<GLRMModel, GLRMModel.GLRMParameters, GLRM
 
           int catColJLevel = _yt._numCatColumns[j];
           Arrays.fill(xy, 0, catColJLevel, 0);
-]          if (Double.isNaN(a[j])) continue;   // Skip missing observations in row
+          if (Double.isNaN(a[j])) continue;   // Skip missing observations in row
 
           // Calculate x_i * Y_j where Y_j is sub-matrix corresponding to categorical col j
           for (int level = 0; level < catColJLevel ; level++) {
